@@ -43,16 +43,16 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-place_property_reward = 10
-complete_set_reward = 100
-do_nothing_reward = -50
-deck_run_out_reward = -500
-discard_reward = -50
-just_say_no_reward = 50
-deal_reward =50
-hoard_reward = -300
-win_reward = 300
-loss_reward = -300
+place_property_reward = 1
+complete_set_reward = 10
+do_nothing_reward = -5
+deck_run_out_reward = -50
+discard_reward = -5
+just_say_no_reward = 5
+deal_reward =5
+hoard_reward = -30
+win_reward = 30
+loss_reward = -30
 
 class MonopolyGoEnv(AECEnv):
 
@@ -419,13 +419,13 @@ class MonopolyGoEnv(AECEnv):
 
         for _ in range(3):
             for agent in self.agents:
-                player_hand = self.state[agent].get("hand", [])
+                player_hand = self.state[agent].get("hand", deque())
                 player_hand.append(self.draw_from_deck())
                 self.state[agent]["hand"] = player_hand
 
         for _ in range(2):
             for agent in self.agents:
-                player_hand = self.state[agent].get("hand", [])
+                player_hand = self.state[agent].get("hand", deque())
                 player_hand.append(self.deck.popleft())
 
         first_agent = self.agents[0]
@@ -495,7 +495,8 @@ class MonopolyGoEnv(AECEnv):
                     self.state[self.agent_selection]["hand"].append(self.draw_from_deck())
 
     def step(self, action):
-        self._cumulative_rewards[self.agent_selection] = 0
+        for a in self.agents:
+            self._cumulative_rewards[a] = 0
         if action is None:
             self.terminations[self.agent_selection] = True
             self.next_turn()
