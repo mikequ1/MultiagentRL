@@ -43,16 +43,16 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-place_property_reward = 5
-complete_set_reward = 20
-accept_action_reward = -5
-deck_run_out_reward = -20
-discard_reward = -10
-rare_action_reward = 0
-common_action_reward = 0
-bank_reward = -100
-win_reward = 60
-loss_reward = -60
+place_property_reward = 10
+complete_set_reward = 100
+do_nothing_reward = -50
+deck_run_out_reward = -500
+discard_reward = -50
+just_say_no_reward = 50
+deal_reward =50
+hoard_reward = -300
+win_reward = 300
+loss_reward = -300
 
 class MonopolyGoEnv(AECEnv):
 
@@ -69,6 +69,7 @@ class MonopolyGoEnv(AECEnv):
         self.possible_agents = ["player_" + str(r) for r in range(3)]
         self.discard_pile = deque()
         self.winner = -1
+        self.shaped = False
 
         self.action_counts = {a: {} for a in self.possible_agents}
 
@@ -349,9 +350,34 @@ class MonopolyGoEnv(AECEnv):
                     other_banks[i] = bank_value
             return np.concatenate((hand, bank, properties, other_properties, other_banks))
 
+        def simpler_flat_observation():
+            hand = np.zeros(12)
+            bank = np.zeros(1)
+            properties = np.zeros(NUM_PROPERTY_SLOTS)
+            other_properties = np.zeros(NUM_PROPERTY_SLOTS * (len(self.possible_agents) - 1))
+            other_banks = np.zeros(len(self.possible_agents) - 1)
+            completed_sets = np.zeros(1)
+
+            for i, card_id in enumerate(self.state[agent]["hand"]):
+                hand[i] = card_id
+
+            bank[0] = sum(self.state[agent]["bank"])
+
+            for i, property_slot in enumerate(self.state[agent]["property_slots"]):
+                properties[i] = len(property_slot)
+                if len(property_slot) >= CARDS_TO_COMPLETE[i]:
+                    completed_sets += 1
+
+            for k in range(2):
+                for i, property_slot in enumerate(self.state[agent]["other_properties"][k]):
+                        other_properties[i + (k * NUM_PROPERTY_SLOTS)] = len(property_slot)
+                other_banks[k] = sum(self.state[agent]["other_banks"][k])
+
+            return np.concatenate((hand, bank, properties, other_properties, other_banks))
+
         self.fill_action_mask(agent)
         fill_other_info()
-        return flattened_observation()
+        return simpler_flat_observation()
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -498,7 +524,7 @@ class MonopolyGoEnv(AECEnv):
                 while len(own_property_slot) > 0:
                     action_agent_property_slot.append(own_property_slot.pop())
                 self.action_completed = True
-                self._cumulative_rewards[agent] = rare_action_reward
+                self._cumulative_rewards[agent] = deal_reward
 
             elif action_type == "sly_deal":
                 property_slot = self.action_info["target_property_slot"]
@@ -565,8 +591,8 @@ class MonopolyGoEnv(AECEnv):
                 card_id += 39
             card = get_card_from_hand(card_id)
             bank.append(CARD_VALUES[card])
-            if card_id > 19:
-                self._cumulative_rewards[agent] = bank_reward
+            if card_id > 19 or len(bank) > 7:
+                self._cumulative_rewards[agent] = hoard_reward
 
         elif action == "deal_breaker": # Check for just say no
             for card_id in hand:
@@ -581,7 +607,7 @@ class MonopolyGoEnv(AECEnv):
         elif action == "just_say_no":
             self.action_completed = True
 
-            self._cumulative_rewards[agent] = rare_action_reward
+            self._cumulative_rewards[agent] = just_say_no_reward
 
         elif action == "pass_go":
             for card_id in hand:
@@ -678,7 +704,6 @@ class MonopolyGoEnv(AECEnv):
                 target_player=target_player,
                 action_info={"amount_owed": calculate_rent_payment(card_id, double)}
             )
-            self._cumulative_rewards[agent] = common_action_reward
 
         elif action == "place_property":
             property_card = -1
@@ -758,7 +783,6 @@ class MonopolyGoEnv(AECEnv):
             if card == -1:
                 raise ValueError("House not found")
             properties[property_slot].append(card)
-            self._cumulative_rewards[agent] = rare_action_reward
 
         elif action == "place_hotel":
             card = -1
@@ -770,7 +794,6 @@ class MonopolyGoEnv(AECEnv):
             if card == -1:
                 raise ValueError("Hotel not found")
             properties[property_slot].append(card)
-            self._cumulative_rewards[agent] = rare_action_reward
 
         elif action == "pay_sum_from_property":
             target_property_slot = self.state[agent]["property_slots"][property_slot]
@@ -785,7 +808,6 @@ class MonopolyGoEnv(AECEnv):
 
         elif action == "accept_action":
             accept_action()
-            self._cumulative_rewards[agent] = accept_action_reward
 
         elif action == "discard_card":
             card_id = property_slot
@@ -794,7 +816,7 @@ class MonopolyGoEnv(AECEnv):
 
         elif action == "do_nothing":
             self.current_agent_turns_taken = 1
-            self._cumulative_rewards[agent] = common_action_reward
+            self._cumulative_rewards[agent] = do_nothing_reward
 
         else:
             raise ValueError(f"Unrecognized action: {action}")
@@ -809,4 +831,6 @@ class MonopolyGoEnv(AECEnv):
         if len(self.completed_properties[agent]) == 3:
             self.winner = self.agents.index(agent)
 
+        if not self.shaped:
+            self._cumulative_rewards[agent] = 0
         self.next_turn()

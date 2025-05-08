@@ -2,3 +2,5 @@ pettingzoo
 gymnasium
 numpy
 pytest
+torch
+matplotlib

@@ -31,12 +31,15 @@ class CentralizedDQNAgent:
         self.target_update = target_update
         self.steps = 0
 
-    def select(self, obs, eps):
+    def select(self, obs, eps, mask):
         state = torch.tensor(np.concatenate(obs), dtype=torch.float32).unsqueeze(0)
         if random.random() < eps:
-            return [random.randrange(self.act_dim) for _ in range(self.n_agents)]
+            return [np.random.choice(np.where(mask[i])[0]) for i in range(self.n_agents)]
         with torch.no_grad():
-            q_values = self.model(state).view(self.n_agents, -1)
+            q_values = self.model(state).view(self.n_agents, -1)  # shape: [n_agents, act_dim]
+            for i in range(self.n_agents):
+                illegal = (torch.tensor(mask[i]) == 0)
+                q_values[i][illegal] = -1e9  # mask invalid actions
             return [q.argmax().item() for q in q_values]
 
     def store(self, s, a, r, s2, d):
@@ -179,8 +182,6 @@ class MADDPGAgent:
         if random.random() < eps:
             return random.randrange(len(probs))
         return int(probs.argmax().item())
-    
-
 
 
 class MAPPOActor(nn.Module):
