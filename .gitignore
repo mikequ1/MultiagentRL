@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Jupyter autosave
+*.~ipynb
+
+# VSCode / PyCharm / JetBrains IDEs
+.idea/
+.vscode/
+
+# Environment files (optional, if you use virtualenv)
+env/
+.venv/
+
+# OS files
+.DS_Store
+
+# Requirements - keep only the one at root
+Monopoly_Go/requirements.txt
