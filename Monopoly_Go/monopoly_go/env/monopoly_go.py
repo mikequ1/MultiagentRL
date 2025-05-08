@@ -82,7 +82,6 @@ class MonopolyGoEnv(AECEnv):
     def draw_from_deck(self):
         if not self.deck:
             if not self.discard_pile:
-                print("Game over due to deck running out")
                 self.deck_ran_out = True
                 return -1
             self.deck = self.discard_pile

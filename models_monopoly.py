@@ -9,8 +9,7 @@ import numpy as np
 
 
 class CentralizedDQNAgent:
-    def __init__(self, obs_dim, act_dim, n_agents, lr=1e-3, buf_size=100000, batch_size=128, gamma=0.95,
-                 target_update=100):
+    def __init__(self, obs_dim, act_dim, n_agents, lr=1e-3, buf_size=100000, batch_size=128, gamma=0.95, target_update=100):
         self.n_agents = n_agents
         self.act_dim = act_dim
         self.obs_dim = obs_dim
@@ -32,13 +31,23 @@ class CentralizedDQNAgent:
         self.target_update = target_update
         self.steps = 0
 
-    def select(self, obs, eps):
-        state = torch.tensor(np.concatenate(obs), dtype=torch.float32).unsqueeze(0)
+    def select(self, obs, eps, masks, acting_agent):
+        state = torch.tensor(np.array(np.concatenate(obs)), dtype=torch.float32).unsqueeze(0)
+
         if random.random() < eps:
-            return [random.randrange(self.act_dim) for _ in range(self.n_agents)]
+            legal_actions = np.where(masks[acting_agent])[0]
+            if len(legal_actions) == 0:
+                return random.randint(0, self.act_dim)
+            return np.random.choice(legal_actions)
+
         with torch.no_grad():
             q_values = self.model(state).view(self.n_agents, -1)
-            return [q.argmax().item() for q in q_values]
+            agent_q = q_values[acting_agent]
+
+            illegal = (torch.tensor(masks[acting_agent]) == 0)
+            agent_q[illegal] = -1e9
+
+            return agent_q.argmax().item()
 
     def store(self, s, a, r, s2, d):
         self.buffer.append((np.concatenate(s), a, r, np.concatenate(s2), d))
@@ -46,22 +55,43 @@ class CentralizedDQNAgent:
     def update(self):
         if len(self.buffer) < self.batch_size:
             return
+
         batch = random.sample(self.buffer, self.batch_size)
         states_b, actions_b, rewards_b, next_states_b, dones_b = zip(*batch)
-        states_b = torch.tensor(states_b, dtype=torch.float32)
-        actions_b = torch.tensor(actions_b, dtype=torch.int64)
-        rewards_b = torch.tensor(rewards_b, dtype=torch.float32)
-        next_states_b = torch.tensor(next_states_b, dtype=torch.float32)
-        dones_b = torch.tensor(dones_b, dtype=torch.float32)
 
+        # Convert to tensors
+        states_b = torch.tensor(np.array(states_b), dtype=torch.float32)
+        actions_b = torch.tensor(np.array(actions_b), dtype=torch.int64)
+        rewards_b = torch.tensor(np.array(rewards_b), dtype=torch.float32)
+        next_states_b = torch.tensor(np.array(next_states_b), dtype=torch.float32)
+        dones_b = torch.tensor(np.array(dones_b), dtype=torch.float32)
+
+        # Forward pass
         q_vals = self.model(states_b).view(self.batch_size, self.n_agents, -1)
         next_q_vals = self.target_model(next_states_b).view(self.batch_size, self.n_agents, -1)
 
-        chosen_q = q_vals.gather(2, actions_b.unsqueeze(-1)).squeeze(-1)
+        # Mask for active agents (action != -1)
+        valid_mask = (actions_b != -1)
+
+        # Replace -1 actions with dummy index (won't matter since we'll mask them out)
+        safe_actions = actions_b.clone()
+        safe_actions[~valid_mask] = 0
+
+        # Gather predicted Q-values for taken actions
+        chosen_q = q_vals.gather(2, safe_actions.unsqueeze(-1)).squeeze(-1)
         max_next_q = next_q_vals.max(dim=2)[0]
 
+        # Compute targets
         targets = rewards_b + self.gamma * max_next_q * (1 - dones_b[:, 0].unsqueeze(1))
-        loss = F.mse_loss(chosen_q, targets.detach())
+
+        # Apply the valid_mask before computing loss
+        masked_pred_q = chosen_q[valid_mask]
+        masked_targets = targets.detach()[valid_mask]
+
+        if masked_pred_q.numel() == 0:
+            return  # no valid samples in this batch
+
+        loss = F.mse_loss(masked_pred_q, masked_targets)
 
         self.opt.zero_grad()
         loss.backward()
@@ -75,11 +105,11 @@ class CentralizedDQNAgent:
 class DQNAgent:
     def __init__(self, obs_dim, propose_dim, accept_dim, lr=1e-3,
                  buf_size=5000, batch_size=64, gamma=0.99, target_update=100):
-        self.propose_net = nn.Sequential(nn.Linear(obs_dim, 64), nn.ReLU(), nn.Linear(64, propose_dim))
-        self.propose_target = nn.Sequential(nn.Linear(obs_dim, 64), nn.ReLU(), nn.Linear(64, propose_dim))
+        self.propose_net = nn.Sequential(nn.Linear(obs_dim,64), nn.ReLU(), nn.Linear(64, propose_dim))
+        self.propose_target = nn.Sequential(nn.Linear(obs_dim,64), nn.ReLU(), nn.Linear(64, propose_dim))
         self.propose_target.load_state_dict(self.propose_net.state_dict())
-        self.accept_net = nn.Sequential(nn.Linear(obs_dim, 64), nn.ReLU(), nn.Linear(64, accept_dim))
-        self.accept_target = nn.Sequential(nn.Linear(obs_dim, 64), nn.ReLU(), nn.Linear(64, accept_dim))
+        self.accept_net = nn.Sequential(nn.Linear(obs_dim,64), nn.ReLU(), nn.Linear(64, accept_dim))
+        self.accept_target = nn.Sequential(nn.Linear(obs_dim,64), nn.ReLU(), nn.Linear(64, accept_dim))
         self.accept_target.load_state_dict(self.accept_net.state_dict())
         self.opt = optim.Adam(list(self.propose_net.parameters()) + list(self.accept_net.parameters()), lr=lr)
         self.buffer = collections.deque(maxlen=buf_size)
@@ -108,20 +138,20 @@ class DQNAgent:
         if len(self.buffer) < self.batch_size:
             return
         batch = random.sample(self.buffer, self.batch_size)
-        s, a, r, s2, d, is_prop = zip(*batch)
+        s,a,r,s2,d,is_prop = zip(*batch)
         s_v = torch.from_numpy(np.array(s)).float()
-        s2_v = torch.from_numpy(np.array(s2)).float()
+        s2_v= torch.from_numpy(np.array(s2)).float()
         a_v = torch.tensor(a).long()
         r_v = torch.tensor(r, dtype=torch.float32)
         d_v = torch.tensor(d, dtype=torch.float32)
         is_p_v = torch.tensor(is_prop)
 
         q_prop = self.propose_net(s_v)
-        q_acc = self.accept_net(s_v)
+        q_acc  = self.accept_net(s_v)
 
         # Split actions
-        a_prop = torch.clamp(a_v, max=q_prop.shape[1] - 1)
-        a_acc = torch.clamp(a_v, max=q_acc.shape[1] - 1)
+        a_prop = torch.clamp(a_v, max=q_prop.shape[1]-1)
+        a_acc  = torch.clamp(a_v, max=q_acc.shape[1]-1)
 
         q = torch.where(
             is_p_v,
@@ -131,18 +161,17 @@ class DQNAgent:
 
         with torch.no_grad():
             q2_prop = self.propose_target(s2_v).max(1)[0]
-            q2_acc = self.accept_target(s2_v).max(1)[0]
+            q2_acc  = self.accept_target(s2_v).max(1)[0]
             q2 = torch.where(is_p_v, q2_prop, q2_acc)
             tgt = r_v + self.gamma * q2 * (1 - d_v)
 
         loss = F.mse_loss(q, tgt)
-        self.opt.zero_grad();
-        loss.backward();
-        self.opt.step()
+        self.opt.zero_grad(); loss.backward(); self.opt.step()
         self.steps += 1
         if self.steps % self.target_update == 0:
             self.propose_target.load_state_dict(self.propose_net.state_dict())
             self.accept_target.load_state_dict(self.accept_net.state_dict())
+
 
 
 class MADDPGActor(nn.Module):
@@ -153,7 +182,6 @@ class MADDPGActor(nn.Module):
     def forward(self, obs):
         return self.net(obs)
 
-
 class MADDPGCritic(nn.Module):
     def __init__(self, full_obs_dim, full_act_dim):
         super().__init__()
@@ -161,7 +189,6 @@ class MADDPGCritic(nn.Module):
 
     def forward(self, full_obs, full_acts):
         return self.net(torch.cat([full_obs, full_acts], dim=-1))
-
 
 class MADDPGAgent:
     def __init__(self, obs_dim, act_dim, full_obs_dim, full_act_dim, lr=1e-3):
@@ -192,7 +219,6 @@ class MAPPOActor(nn.Module):
     def forward(self, obs):
         return self.net(obs)
 
-
 class MAPPOCritic(nn.Module):
     def __init__(self, full_obs_dim):
         super().__init__()
@@ -200,7 +226,6 @@ class MAPPOCritic(nn.Module):
 
     def forward(self, full_obs):
         return self.net(full_obs)
-
 
 class MAPPOAgent:
     def __init__(self, obs_dim, act_dim, full_obs_dim, lr=1e-3, clip_param=0.2):
