@@ -19,7 +19,7 @@ class DQN(nn.Module):
         return self.net(x)
 
 class ReplayBuffer:
-    def __init__(self, size=10000):
+    def __init__(self, size=5000):
         self.buffer = deque(maxlen=size)
 
     def add(self, transition):

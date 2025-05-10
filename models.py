@@ -136,8 +136,8 @@ class DQNAgent:
             tgt = r_v + self.gamma * q2 * (1 - d_v)
 
         loss = F.mse_loss(q, tgt)
-        self.opt.zero_grad();
-        loss.backward();
+        self.opt.zero_grad()
+        loss.backward()
         self.opt.step()
         self.steps += 1
         if self.steps % self.target_update == 0:

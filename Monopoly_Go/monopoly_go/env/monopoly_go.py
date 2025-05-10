@@ -12,6 +12,7 @@ from Monopoly_Go.monopoly_go.utils import (
     CARDS_IN_PROPERTY_SLOTS,
     CARDS_TO_COMPLETE,
     CARD_VALUES,
+    NUM_CARDS,
     NUM_PROPERTY_SLOTS,
     NUM_RENT_CARDS,
     PROPERTY_TYPE_INDEX,
@@ -43,16 +44,17 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-place_property_reward = 1
+place_property_reward = 50
 complete_set_reward = 10
-do_nothing_reward = -5
-deck_run_out_reward = -50
-discard_reward = -5
-just_say_no_reward = 5
-deal_reward =5
-hoard_reward = -30
-win_reward = 30
-loss_reward = -30
+do_nothing_reward = 0
+deck_run_out_reward = -10
+discard_reward = -100
+just_say_no_reward = 0
+deal_reward = 0
+hoard_reward = -20
+bank_reward = 0
+win_reward = 200
+loss_reward = -200
 
 class MonopolyGoEnv(AECEnv):
 
@@ -70,8 +72,10 @@ class MonopolyGoEnv(AECEnv):
         self.discard_pile = deque()
         self.winner = -1
         self.shaped = False
+        self.all_bankable = True
 
         self.action_counts = {a: {} for a in self.possible_agents}
+        self.action_availabilities = {a: {} for a in self.possible_agents}
 
     def action_space(self, agent=None):
         return Discrete(ACTION_SPACE_LENGTH)
@@ -96,6 +100,8 @@ class MonopolyGoEnv(AECEnv):
 
         # If hand is empty, do nothing
         if not self.state[agent]["hand"] and not self.in_action_cycle and not self.pay_from_property:
+            self.action_availabilities[agent]["forced_action"] =\
+                self.action_availabilities[agent].get("forced_action", 0) + 1
             action_mask[-1] = 1
             self.infos[agent]["action_mask"] = action_mask
             return
@@ -107,6 +113,9 @@ class MonopolyGoEnv(AECEnv):
                     if len(property_slot) > 2:
                         logger.info(f"Deal breaker: marking {start + 1}")
                         action_mask[start + 1] = 1
+            if np.sum(action_mask[offsets["deal_breaker"]:offsets["deal_breaker"] + 20]) > 0:
+                self.action_availabilities[agent]["deal_breaker"] = \
+                    self.action_availabilities[agent].get("deal_breaker", 0) + 1
 
         def mark_sly_deal():
             start = offsets["sly_deal"]
@@ -114,18 +123,25 @@ class MonopolyGoEnv(AECEnv):
                 for i, property_slot in enumerate(properties):
                     if len(property_slot) > 0:
                         action_mask[start+(j*10)+i] = 1
+            if np.sum(action_mask[offsets["sly_deal"]:offsets["sly_deal"] + 20]) > 0:
+                self.action_availabilities[agent]["sly_deal"] = \
+                    self.action_availabilities[agent].get("sly_deal", 0) + 1
 
         def mark_just_say_no():
             start = offsets["just_say_no"]
             for card_id in hand:
                 if card_id in (22,23,24):
                     action_mask[start] = 1
+                    self.action_availabilities[agent]["just_say_no"] = \
+                        self.action_availabilities[agent].get("just_say_no", 0) + 1
                     break
 
         def mark_pass_go():
             start = offsets["pass_go"]
             logger.info(f"Pass go: marking {start}")
             action_mask[start] = 1
+            self.action_availabilities[agent]["pass_go"] = \
+                self.action_availabilities[agent].get("pass_go", 0) + 1
 
         def mark_forced_deal():
             start = offsets["forced_deal"]
@@ -150,15 +166,23 @@ class MonopolyGoEnv(AECEnv):
                         logger.info(
                             f"Forced deal: marking index {index} for your slot {your_slot_idx}, opponent {opp_idx}, their slot {opp_slot_idx}")
                         action_mask[index] = 1
+            if np.sum(action_mask[offsets["forced_deal"]:offsets["forced_deal"] + 200]) > 0:
+                self.action_availabilities[agent]["forced_deal"] = \
+                    self.action_availabilities[agent].get("forced_deal", 0) + 1
 
         def mark_debt_collector():
             start = offsets["debt_collector"]
             action_mask[start] = 1
             action_mask[start+1] = 1
+            self.action_availabilities[agent]["debt_collector"] = \
+                self.action_availabilities[agent].get("debt_collector", 0) + 1
+
 
         def mark_birthday():
             start = offsets["birthday"]
             action_mask[start] = 1
+            self.action_availabilities[agent]["birthday"] = \
+                self.action_availabilities[agent].get("birthday", 0) + 1
 
         def mark_rent(card_id, has_double_the_rent: bool):
             start = offsets["rent"]
@@ -178,8 +202,11 @@ class MonopolyGoEnv(AECEnv):
                 if has_double_the_rent:
                     action_mask[start + rent_card_index + 1] = 1
                     action_mask[start + rent_card_index + 10 + 1] = 1
+                self.action_availabilities[agent]["rent"] = \
+                    self.action_availabilities[agent].get("rent", 0) + 1
             else:
                 logger.info("Does not have associated property card")
+
 
         def mark_property(card_id):
             start = offsets["place_property"]
@@ -188,6 +215,8 @@ class MonopolyGoEnv(AECEnv):
             if len(self.state[agent]["property_slots"][property_slot_index]) < 3:
                 logger.info(f"Property: marking {start + property_slot_index}")
                 action_mask[start + property_slot_index] = 1
+                self.action_availabilities[agent]["place_property"] = \
+                    self.action_availabilities[agent].get("place_property", 0) + 1
 
         def mark_colored_wildcard(card_id):
             start = offsets["place_wildcard"]
@@ -198,55 +227,78 @@ class MonopolyGoEnv(AECEnv):
                 action_mask[start + a] = 1
             if len(self.state[agent]["property_slots"][b]) == 0:
                 action_mask[start + b] = 1
+            self.action_availabilities[agent]["place_wildcard"] = \
+                self.action_availabilities[agent].get("place_wildcard", 0) + 1
 
         def mark_flip_wildcard(property_slot: int):
             start = offsets["flip_wildcard"]
             action_mask[start + property_slot] = 1
+            self.action_availabilities[agent]["flip_wildcard"] = \
+                self.action_availabilities[agent].get("flip_wildcard", 0) + 1
 
         def mark_all_wildcard():
             start = offsets["place_wildcard_all"]
             logger.info(f"All wildcard: marking {start} to {start+9}")
             for i in range(10):
                 action_mask[start + i] = 1
+            if np.sum(action_mask[offsets["place_wildcard_all"]:offsets["place_wildcard_all"] + 10]) > 0:
+                self.action_availabilities[agent]["place_wildcard_all"] = \
+                    self.action_availabilities[agent].get("place_wildcard_all", 0) + 1
 
         def mark_move_wildcard(property_slot: int):
             start = offsets["move_wildcard_all"]
             for i in range(10):
                 action_mask[start + property_slot*10 + i] = 1
+            self.action_availabilities[agent]["move_wildcard_all"] = \
+                self.action_availabilities[agent].get("move_wildcard_all", 0) + 1
 
         def mark_house():
             start = offsets["place_house"]
             for i, property_slot in enumerate(self.state[agent]["property_slots"]):
                 if len(property_slot) > 2:
                     action_mask[start] = 1
+            if np.sum(action_mask[offsets["place_house"]:offsets["place_house"] + 10]) > 0:
+                self.action_availabilities[agent]["place_house"] = \
+                    self.action_availabilities[agent].get("place_house", 0) + 1
 
         def mark_hotel():
             start = offsets["place_hotel"]
             for i, property_slot in enumerate(self.state[agent]["property_slots"]):
                 if len(property_slot) > 2:
                     action_mask[start] = 1
+            if np.sum(action_mask[offsets["place_hotel"]:offsets["place_hotel"] + 10]) > 0:
+                self.action_availabilities[agent]["place_hotel"] = \
+                    self.action_availabilities[agent].get("place_hotel", 0) + 1
 
         def mark_pay_sum_with_property():
             start = offsets["pay_sum_from_property"]
             for i, property_slot in enumerate(self.state[agent]["property_slots"]):
                 if len(property_slot) > 0:
                     action_mask[start + i] = 1
+            self.action_availabilities[agent]["pay_sum_from_property"] = \
+                self.action_availabilities[agent].get("pay_sum_from_property", 0) + 1
 
         def mark_accept_action():
             start = offsets["accept_action"]
             action_mask[start] = 1
+            self.action_availabilities[agent]["accept_action"] = \
+                self.action_availabilities[agent].get("accept_action", 0) + 1
 
         hand = self.state[agent]["hand"]
         if self.must_discard:
             for card_id in hand:
                 action_mask[offsets["discard_card"] + card_id] = 1
             self.infos[agent]["action_mask"] = action_mask
+            self.action_availabilities[agent]["forced_action"] = \
+                self.action_availabilities[agent].get("forced_action", 0) + 1
             return
 
         if self.in_action_cycle:
             if self.pay_from_property:
                 mark_pay_sum_with_property()
                 self.infos[agent]["action_mask"] = action_mask
+                self.action_availabilities[agent]["forced_action"] = \
+                    self.action_availabilities[agent].get("forced_action", 0) + 1
                 return
             mark_just_say_no()
             mark_accept_action()
@@ -259,7 +311,7 @@ class MonopolyGoEnv(AECEnv):
         for card_id in hand:
             if card_id in (47, 48):
                 continue
-            if card_id < 62 or card_id > 100:
+            if card_id < 20 or (self.all_bankable and (card_id < 62 or card_id > 100)):
                 action_mask[card_id if card_id < 62 else card_id - 39] = 1
 
             if card_id in (20, 21):
@@ -303,6 +355,10 @@ class MonopolyGoEnv(AECEnv):
                 logger.info(f"Card ID {card_id} is a hotel. Calling mark_hotel()")
                 mark_hotel()
 
+        if np.sum(action_mask[:NUM_CARDS - 39]) > 0:
+            self.action_availabilities[agent]["bank"] = \
+                self.action_availabilities[agent].get("bank", 0) + 1
+
         for i, property_slot in enumerate(self.state[agent]["property_slots"]):
             for card_id in property_slot:
                 if 90 <= card_id <= 98:
@@ -311,6 +367,8 @@ class MonopolyGoEnv(AECEnv):
                     mark_move_wildcard(i)
 
         action_mask[-1] = 1
+        self.action_availabilities[agent]["do_nothing"] = \
+            self.action_availabilities[agent].get("do_nothing", 0) + 1
         self.infos[agent]["action_mask"] = action_mask
         return action_mask
 
@@ -591,8 +649,10 @@ class MonopolyGoEnv(AECEnv):
                 card_id += 39
             card = get_card_from_hand(card_id)
             bank.append(CARD_VALUES[card])
-            if card_id > 19 or len(bank) > 7:
+            if card_id > 19 or len(bank) > 5:
                 self._cumulative_rewards[agent] = hoard_reward
+            if bank_reward:
+                self._cumulative_rewards[agent] = bank_reward
 
         elif action == "deal_breaker": # Check for just say no
             for card_id in hand:

@@ -242,3 +242,82 @@ class MAPPOAgent:
         if random.random() < eps:
             return random.randrange(len(probs))
         return int(probs.argmax().item())
+
+class RolloutBuffer:
+    def __init__(self):
+        self.obs = []
+        self.actions = []
+        self.logprobs = []
+        self.rewards = []
+        self.dones = []
+        self.values = []
+
+    def add(self, obs, action, logprob, reward, done, value):
+        self.obs.append(obs)
+        self.actions.append(action)
+        self.logprobs.append(logprob)
+        self.rewards.append(reward)
+        self.dones.append(done)
+        self.values.append(value)
+
+    def clear(self):
+        self.__init__()
+
+def compute_gae(rewards, dones, values, next_value, gamma=0.99, lam=0.95):
+    advantages = []
+    gae = 0
+    values = values + [next_value]
+    for t in reversed(range(len(rewards))):
+        delta = rewards[t] + gamma * values[t+1] * (1 - dones[t]) - values[t]
+        gae = delta + gamma * lam * (1 - dones[t]) * gae
+        advantages.insert(0, gae)
+    returns = [adv + val for adv, val in zip(advantages, values[:-1])]
+    return advantages, returns
+
+
+def ppo_update(agent, buffer, batch_size=64, epochs=4, gamma=0.99, lam=0.95):
+    next_value = agent.critic(torch.tensor(buffer.obs[-1], dtype=torch.float32).unsqueeze(0)).item()
+    advs, rets = compute_gae(buffer.rewards, buffer.dones, buffer.values, next_value, gamma, lam)
+
+    obs_tensor = torch.tensor(buffer.obs, dtype=torch.float32)
+    actions_tensor = torch.tensor(buffer.actions)
+    logprobs_tensor = torch.tensor(buffer.logprobs)
+    advantages_tensor = torch.tensor(advs, dtype=torch.float32)
+    returns_tensor = torch.tensor(rets, dtype=torch.float32)
+
+    for _ in range(epochs):
+        indices = np.arange(len(buffer.obs))
+        np.random.shuffle(indices)
+        for start in range(0, len(indices), batch_size):
+            end = start + batch_size
+            batch_idx = indices[start:end]
+
+            obs_b = obs_tensor[batch_idx]
+            act_b = actions_tensor[batch_idx]
+            old_logprobs_b = logprobs_tensor[batch_idx]
+            adv_b = advantages_tensor[batch_idx]
+            ret_b = returns_tensor[batch_idx]
+
+            # Policy loss
+            probs = agent.actor(obs_b)
+            dist = torch.distributions.Categorical(probs)
+            logprobs = dist.log_prob(act_b)
+            ratio = (logprobs - old_logprobs_b).exp()
+            surr1 = ratio * adv_b
+            surr2 = torch.clamp(ratio, 1 - agent.clip_param, 1 + agent.clip_param) * adv_b
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            # Value loss
+            values = agent.critic(obs_b).squeeze(1)
+            critic_loss = F.mse_loss(values, ret_b)
+
+            # Optimize
+            agent.actor_opt.zero_grad()
+            actor_loss.backward()
+            agent.actor_opt.step()
+
+            agent.critic_opt.zero_grad()
+            critic_loss.backward()
+            agent.critic_opt.step()
+
+    return actor_loss.item(), critic_loss.item()
